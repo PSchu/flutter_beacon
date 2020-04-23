@@ -9,7 +9,6 @@
 @property FlutterEventSink flutterEventSinkBluetooth;
 @property FlutterEventSink flutterEventSinkAuthorization;
 
-- (void) initializeCentralManager;
 - (void) initializeLocationManager;
 - (void) startRangingBeaconWithCall:(id)arguments;
 - (void) stopRangingBeacon;
