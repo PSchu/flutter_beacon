@@ -133,7 +133,7 @@
     if ([@"requestAuthorization" isEqualToString:call.method]) {
         if (self.locationManager) {
             self.flutterResult = result;
-            [self.locationManager requestAlwaysAuthorization];
+            [self.locationManager requestWhenInUseAuthorization];
         } else {
             result(@(YES));
         }
