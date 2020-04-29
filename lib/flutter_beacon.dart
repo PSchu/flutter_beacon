@@ -128,6 +128,8 @@ class FlutterBeacon {
 
   /// Close scanning API.
   Future<bool> get close async {
+    _onRanging = null;
+    _onMonitoring = null;
     return await _methodChannel.invokeMethod('close');
   }
 
