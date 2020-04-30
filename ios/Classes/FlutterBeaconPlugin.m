@@ -583,7 +583,7 @@ static BOOL initialized = NO;
                                             });
         }
         [self sendMonitoringEvent:@{
-            @"event": @"didExitRegion",
+            @"event": @"didEnterRegion",
             @"region": dictRegion
         }];
     }
