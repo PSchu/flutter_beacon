@@ -7,10 +7,12 @@ library flutter_beacon;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_beacon/callbackDispatcher.dart';
 
 part 'beacon/beacon.dart';
 part 'beacon/bluetooth_state.dart';
@@ -59,6 +61,27 @@ class FlutterBeacon {
 
   /// This information does not change from call to call. Cache it.
   Stream<AuthorizationStatus> _onAuthorizationStatus;
+
+  /// Event Channel used to communicate to native code monitoring beacons in background.
+  static const MethodChannel _monitoringChannel_background =
+      MethodChannel('flutter_beacon_event_monitoring_background');
+
+  /// Initialize the plugin and request relevant permissions from the user.
+  Future<void> initializeBackground() async {
+    final CallbackHandle callback =
+        PluginUtilities.getCallbackHandle(callbackDispatcher);
+    await _methodChannel.invokeMethod(
+        'initializeBackground', <dynamic>[callback.toRawHandle()]);
+  }
+
+  Future<void> registerBackgroundMonitoring(List<Region> regions,
+      void Function(MonitoringResult monitoringResult) callback) async {
+    final List<dynamic> args = <dynamic>[
+      PluginUtilities.getCallbackHandle(callback).toRawHandle()
+    ];
+    args.addAll(regions.map((Region region) => region.toJson).toList());
+    await _methodChannel.invokeMethod('startMonitorRegionsInBackground', args);
+  }
 
   /// Initialize scanning API.
   Future<bool> get initializeScanning async {

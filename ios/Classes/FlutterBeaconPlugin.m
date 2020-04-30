@@ -24,7 +24,17 @@
 
 @end
 
-@implementation FlutterBeaconPlugin
+@implementation FlutterBeaconPlugin{
+    FlutterEngine *_headlessRunner;
+    NSUserDefaults *_persistentState;
+    NSObject<FlutterPluginRegistrar> *_registrar;
+    FlutterMethodChannel *_callbackChannel;
+}
+
+static FlutterPluginRegistrantCallback registerPlugins = nil;
+static NSString * _Nonnull kCallbackMapping = @"monitoring_callback_mapping";
+static BOOL backgroundIsolateRun = NO;
+
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"flutter_beacon"
                                                                 binaryMessenger:[registrar messenger]];
@@ -56,10 +66,31 @@
     [streamChannelAuthorization setStreamHandler:instance.authorizationHandler];
 }
 
++ (void)setPluginRegistrantCallback:(FlutterPluginRegistrantCallback)callback {
+  registerPlugins = callback;
+}
+
+- (instancetype)init
+{
+    self = [super init];
+    if (self) {
+        _persistentState = [NSUserDefaults standardUserDefaults];
+    }
+    return self;
+}
+
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
+    NSArray *arguments = call.arguments;
     if ([@"initialize" isEqualToString:call.method]) {
         [self initializeLocationManager];
         [self initializeCentralManager];
+        result(@(YES));
+        return;
+    }
+
+    if ([@"initializeBackground" isEqualToString:call.method]) {
+        [self initializeLocationManager];
+        [self startBackgroundService:[arguments[0] longValue]];
         result(@(YES));
         return;
     }
@@ -160,8 +191,27 @@
         result(@(YES));
         return;
     }
-    
+
+    if ([@"startMonitorRegionsInBackground" isEqualToString:call.method]) {
+        [self startMonitorRegionsInBackground:arguments];
+        result(@(YES));
+        return;
+    }
+
+
     result(FlutterMethodNotImplemented);
+}
+
+- (BOOL)application:(UIApplication *)application
+    didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+  // Check to see if we're being launched due to a location event.
+  if (launchOptions[UIApplicationLaunchOptionsLocationKey] != nil) {
+    // Restart the headless service.
+    [self startBackgroundService:[self getCallbackDispatcherHandle]];
+  }
+
+  // Note: if we return NO, this vetos the launch of the application.
+  return YES;
 }
 
 - (void) initializeCentralManager {
@@ -177,6 +227,39 @@
         self.locationManager = [[CLLocationManager alloc] init];
         self.locationManager.delegate = self;
     }
+}
+
+- (void)startBackgroundService:(int64_t)handle {
+    [self setCallbackDispatcherHandle:handle];
+    FlutterCallbackInformation *info = [FlutterCallbackCache lookupCallbackInformation:handle];
+    NSAssert(info != nil, @"failed to find callback");
+    NSString *entrypoint = info.callbackName;
+    NSString *uri = info.callbackLibraryPath;
+    [_headlessRunner runWithEntrypoint:entrypoint libraryURI:uri];
+    NSAssert(registerPlugins != nil, @"failed to set registerPlugins");
+    
+    // Once our headless runner has been started, we need to register the application's plugins
+    // with the runner in order for them to work on the background isolate. `registerPlugins` is
+    // a callback set from AppDelegate.m in the main application. This callback should register
+    // all relevant plugins (excluding those which require UI).
+    if (!backgroundIsolateRun) {
+        registerPlugins(_headlessRunner);
+    }
+    [_registrar addMethodCallDelegate:self channel:_callbackChannel];
+    backgroundIsolateRun = YES;
+}
+
+- (int64_t)getCallbackDispatcherHandle {
+  id handle = [_persistentState objectForKey:@"callback_dispatcher_handle"];
+  if (handle == nil) {
+    return 0;
+  }
+  return [handle longLongValue];
+}
+
+- (void)setCallbackDispatcherHandle:(int64_t)handle {
+  [_persistentState setObject:[NSNumber numberWithLongLong:handle]
+                       forKey:@"callback_dispatcher_handle"];
 }
 
 ///------------------------------------------------------------
@@ -215,6 +298,33 @@
 ///------------------------------------------------------------
 #pragma mark - Flutter Beacon Monitoring
 ///------------------------------------------------------------
+
+- (void) startMonitorRegionsInBackground: (id)arguments {
+    int64_t callbackHandle = [arguments[0] longLongValue];
+    [self setCallbackHandle:callbackHandle];
+
+
+}
+
+- (void)setCallbackHandle:(int64_t)handle {
+  [self setCallback:[NSNumber numberWithLongLong:handle]];
+}
+
+- (int64_t)getCallbackHandleForRegionId:(NSString *)identifier {
+  id handle = [self getCallback];
+  if (handle == nil) {
+    return 0;
+  }
+  return [handle longLongValue];
+}
+
+- (NSNumber *)getCallback {
+  return (NSNumber *)[_persistentState objectForKey:kCallbackMapping];
+}
+
+- (void)setCallback:(NSNumber *)callbackID {
+  [_persistentState setObject:callbackID forKey:kCallbackMapping];
+}
 
 - (void) startMonitoringBeaconWithCall:(id)arguments {
     if (self.regionMonitoring) {
