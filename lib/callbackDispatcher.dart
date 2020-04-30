@@ -8,7 +8,7 @@ import 'package:flutter_beacon/flutter_beacon.dart';
 
 void callbackDispatcher() {
   const MethodChannel _backgroundChannel =
-  MethodChannel('plugins.flutter.io/geofencing_plugin_background');
+  MethodChannel('flutter_beacon_event_monitoring_background');
   WidgetsFlutterBinding.ensureInitialized();
 
   _backgroundChannel.setMethodCallHandler((MethodCall call) async {
@@ -16,9 +16,8 @@ void callbackDispatcher() {
     final Function callback = PluginUtilities.getCallbackFromHandle(
         CallbackHandle.fromRawHandle(args[0]));
     assert(callback != null);
-    final String resultString = args[1] as String;
-    final MonitoringResult result = MonitoringResult.from(jsonDecode(resultString));
+    final MonitoringResult result = MonitoringResult.from(args[1]);
     callback(result);
   });
-  _backgroundChannel.invokeMethod('GeofencingService.initialized');
+  _backgroundChannel.invokeMethod('initializeDispatch');
 }

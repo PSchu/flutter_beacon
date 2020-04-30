@@ -29,16 +29,19 @@
     NSUserDefaults *_persistentState;
     NSObject<FlutterPluginRegistrar> *_registrar;
     FlutterMethodChannel *_callbackChannel;
+    FlutterMethodChannel *_mainChannel;
+    NSMutableArray *_eventQueue;
 }
 
 static FlutterPluginRegistrantCallback registerPlugins = nil;
 static NSString * _Nonnull kCallbackMapping = @"monitoring_callback_mapping";
 static BOOL backgroundIsolateRun = NO;
+static BOOL initialized = NO;
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"flutter_beacon"
                                                                 binaryMessenger:[registrar messenger]];
-    FlutterBeaconPlugin* instance = [[FlutterBeaconPlugin alloc] init];
+    FlutterBeaconPlugin* instance = [[FlutterBeaconPlugin alloc] initWithRegistrar: registrar];
     [registrar addMethodCallDelegate:instance channel:channel];
     
     instance.rangingHandler = [[FBRangingStreamHandler alloc] initWithFlutterBeaconPlugin:instance];
@@ -70,11 +73,32 @@ static BOOL backgroundIsolateRun = NO;
   registerPlugins = callback;
 }
 
-- (instancetype)init
+- (instancetype)initWithRegistrar: (NSObject<FlutterPluginRegistrar> *)registrar 
 {
     self = [super init];
     if (self) {
+          self = [super init];
+        NSAssert(self, @"super init cannot be nil");
         _persistentState = [NSUserDefaults standardUserDefaults];
+        _eventQueue = [[NSMutableArray alloc] init];
+        _locationManager = [[CLLocationManager alloc] init];
+        [_locationManager setDelegate:self];
+        [_locationManager requestAlwaysAuthorization];
+        if (@available(iOS 9.0, *)) {
+            _locationManager.allowsBackgroundLocationUpdates = YES;
+        }
+
+        _headlessRunner = [[FlutterEngine alloc] initWithName:@"FlutterBeaconIsolate" project:nil allowHeadlessExecution:YES];
+        _registrar = registrar;
+
+        _mainChannel = [FlutterMethodChannel methodChannelWithName:@"flutter_beacon"
+                                                   binaryMessenger:[registrar messenger]];
+        [registrar addMethodCallDelegate:self channel:_mainChannel];
+
+        _callbackChannel =
+            [FlutterMethodChannel methodChannelWithName:@"flutter_beacon_event_monitoring_background"
+                                        binaryMessenger:_headlessRunner];
+        return self;
     }
     return self;
 }
@@ -91,6 +115,17 @@ static BOOL backgroundIsolateRun = NO;
     if ([@"initializeBackground" isEqualToString:call.method]) {
         [self initializeLocationManager];
         [self startBackgroundService:[arguments[0] longValue]];
+        result(@(YES));
+        return;
+    }
+    
+    if ([@"initializeDispatch" isEqualToString:call.method]) {
+        initialized = YES;
+        while ([_eventQueue count] > 0) {
+            NSDictionary* event = _eventQueue[0];
+            [_eventQueue removeObjectAtIndex:0];
+            [self sendMonitoringEvent:event];
+        }
         result(@(YES));
         return;
     }
@@ -299,11 +334,12 @@ static BOOL backgroundIsolateRun = NO;
 #pragma mark - Flutter Beacon Monitoring
 ///------------------------------------------------------------
 
-- (void) startMonitorRegionsInBackground: (id)arguments {
+- (void) startMonitorRegionsInBackground: (NSArray*)arguments {
     int64_t callbackHandle = [arguments[0] longLongValue];
     [self setCallbackHandle:callbackHandle];
 
-
+    NSArray* regionInfos = [arguments subarrayWithRange: NSMakeRange(1, arguments.count - 1)];
+    [self startMonitoringBeaconWithCall:regionInfos];
 }
 
 - (void)setCallbackHandle:(int64_t)handle {
@@ -529,75 +565,102 @@ static BOOL backgroundIsolateRun = NO;
 }
 
 - (void)locationManager:(CLLocationManager *)manager didEnterRegion:(CLRegion *)region {
-    if (self.flutterEventSinkMonitoring) {
-        CLBeaconRegion *reg;
-        for (CLBeaconRegion *r in self.regionMonitoring) {
-            if ([region.identifier isEqualToString:r.identifier]) {
-                reg = r;
-                break;
-            }
+    
+    CLBeaconRegion *reg;
+    for (CLBeaconRegion *r in self.regionMonitoring) {
+        if ([region.identifier isEqualToString:r.identifier]) {
+            reg = r;
+            break;
         }
-        
-        if (reg) {
-            NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
+    }
+    
+    if (reg) {
+        NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
+        if (self.flutterEventSinkMonitoring) {
             self.flutterEventSinkMonitoring(@{
-                                              @"event": @"didEnterRegion",
-                                              @"region": dictRegion
-                                              });
+                @"event": @"didEnterRegion",
+                @"region": dictRegion
+                                            });
         }
+        [self sendMonitoringEvent:@{
+            @"event": @"didExitRegion",
+            @"region": dictRegion
+        }];
     }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didExitRegion:(CLRegion *)region {
-    if (self.flutterEventSinkMonitoring) {
-        CLBeaconRegion *reg;
-        for (CLBeaconRegion *r in self.regionMonitoring) {
-            if ([region.identifier isEqualToString:r.identifier]) {
-                reg = r;
-                break;
-            }
+    
+    CLBeaconRegion *reg;
+    for (CLBeaconRegion *r in self.regionMonitoring) {
+        if ([region.identifier isEqualToString:r.identifier]) {
+            reg = r;
+            break;
         }
-        
-        if (reg) {
-            NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
+    }
+    
+    if (reg) {
+        NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
+        if (self.flutterEventSinkMonitoring) {
             self.flutterEventSinkMonitoring(@{
-                                              @"event": @"didExitRegion",
-                                              @"region": dictRegion
-                                              });
+                @"event": @"didExitRegion",
+                @"region": dictRegion
+                                            });
         }
+        [self sendMonitoringEvent:@{
+            @"event": @"didExitRegion",
+            @"region": dictRegion
+        }];
     }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didDetermineState:(CLRegionState)state forRegion:(CLRegion *)region {
-    if (self.flutterEventSinkMonitoring) {
-        CLBeaconRegion *reg;
-        for (CLBeaconRegion *r in self.regionMonitoring) {
-            if ([region.identifier isEqualToString:r.identifier]) {
-                reg = r;
+   
+    CLBeaconRegion *reg;
+    for (CLBeaconRegion *r in self.regionMonitoring) {
+        if ([region.identifier isEqualToString:r.identifier]) {
+            reg = r;
+            break;
+        }
+    }
+    
+    if (reg) {
+        NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
+        NSString *stt;
+        switch (state) {
+            case CLRegionStateInside:
+                stt = @"INSIDE";
                 break;
-            }
+            case CLRegionStateOutside:
+                stt = @"OUTSIDE";
+                break;
+            default:
+                stt = @"UNKNOWN";
+                break;
         }
-        
-        if (reg) {
-            NSDictionary *dictRegion = [FBUtils dictionaryFromCLBeaconRegion:reg];
-            NSString *stt;
-            switch (state) {
-                case CLRegionStateInside:
-                    stt = @"INSIDE";
-                    break;
-                case CLRegionStateOutside:
-                    stt = @"OUTSIDE";
-                    break;
-                default:
-                    stt = @"UNKNOWN";
-                    break;
-            }
+        if (self.flutterEventSinkMonitoring) {
             self.flutterEventSinkMonitoring(@{
-                                              @"event": @"didDetermineStateForRegion",
-                                              @"region": dictRegion,
-                                              @"state": stt
-                                              });
+                @"event": @"didDetermineStateForRegion",
+                @"region": dictRegion,
+                @"state": stt
+                                            });
         }
+        [self sendMonitoringEvent:@{
+            @"event": @"didDetermineStateForRegion",
+            @"region": dictRegion,
+            @"state": stt
+        }];
+    }
+}
+
+- (void)sendMonitoringEvent:(NSDictionary *)eventData {
+    if (initialized) {
+        int64_t handle = [self getCallback].longLongValue;
+        [_callbackChannel
+         invokeMethod:@""
+         arguments:@[@(handle), eventData]];
+    } else {
+        [_eventQueue addObject:eventData];
     }
 }
 
